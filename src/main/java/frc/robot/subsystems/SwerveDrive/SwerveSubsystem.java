@@ -31,8 +31,6 @@ import swervelib.telemetry.SwerveDriveTelemetry.TelemetryVerbosity;
 
 public class SwerveSubsystem extends SubsystemBase {
 
-  private final static SwerveSubsystem INSTANCE = new SwerveSubsystem();
-
   // Sparkmaxes/motors for each swerve module
   SparkMax frontLeftDrive = new SparkMax(SparkMaxIDs.FRONT_LEFT_DRIVE, MotorType.kBrushless);
   SparkMax frontRightDrive = new SparkMax(SparkMaxIDs.FRONT_RIGHT_DRIVE, MotorType.kBrushless);
@@ -77,11 +75,7 @@ public class SwerveSubsystem extends SubsystemBase {
   SwerveDriveKinematics kinematics;
   SwerveDriveOdometry odometry;
 
-  /**
-   * Creates a new instance of this SwerveSubsytem.
-   * This constructor is private since this class is a Singleton. External classes
-   * should use the {@link #getInstance()} method to get the instance.
-   */
+  /** Creates a new SwerveSubsytem. */
   public SwerveSubsystem() {
 
     SwerveDriveTelemetry.verbosity = TelemetryVerbosity.LOW; // TODO LOWER THIS AT COMP, SLOWS COMPUTATION
@@ -94,8 +88,8 @@ public class SwerveSubsystem extends SubsystemBase {
 
     gyro.setFusedHeading(0);
 
-    odometry = new SwerveDriveOdometry(kinematics, new Rotation2d(Math.toRadians(gyro.getFusedHeading())),
-        modulePositions());
+    odometry = new SwerveDriveOdometry(kinematics, 
+			new Rotation2d(Math.toRadians(gyro.getFusedHeading())), modulePositions());
   }
 
   public final SwerveModulePosition[] modulePositions() {
@@ -116,70 +110,68 @@ public class SwerveSubsystem extends SubsystemBase {
     };
   }
 
-  public void drive(double x, double y, double turn, boolean field, boolean turbo, boolean updatingOffsets) {
+  public void drive(double x, double y, double turn, boolean field, boolean turbo) {
+    // Deadbands all of the values to prevent drift
     double dturn = InputUtil.deadband(turn);
-    double dx = InputUtil.deadband(x) / (turbo ? 1 : 2);
-    double dy = InputUtil.deadband(y) / (turbo ? 1 : 2);
+    double dx = InputUtil.deadband(x) / (turbo ? 1 : 1.25); // Normal speed is 80%, turbo is 100%
+    double dy = InputUtil.deadband(y) / (turbo ? 1 : 1.25);
+		
+		// Makes the robot control field relative
+		if (field == true) {
+    	double gyroRads = Math.toRadians(-gyro.getFusedHeading());
+    	double temp = dy * Math.cos(gyroRads) + dx * Math.sin(gyroRads);
+    	dx = -dy * Math.sin(gyroRads) + dx * Math.cos(gyroRads);
+    	dy = temp;
+		}
 
-    if (field) {
-      double gyroRads = Math.toRadians(-gyro.getFusedHeading());
-      double temp = dy * Math.cos(gyroRads) + dx * Math.sin(gyroRads);
-      dx = -dy * Math.sin(gyroRads) + dx * Math.cos(gyroRads);
-      dy = temp;
-    }
+		// Gets the desired states for each module. Note that "dturn" is negative because 
+		// the joystick positive direction and WPILib-positive rotation direction are opposite
+    SwerveModuleState[] states = kinematics.toSwerveModuleStates(new ChassisSpeeds(dx, dy, -dturn));
 
-    if (!updatingOffsets) {
-      SwerveModuleState[] states = kinematics.toSwerveModuleStates(new ChassisSpeeds(dx, dy, -dturn));
+		// Optimizes the module states to prevent unnecessary extra rotation
+    states[0] = optimize(states[0], Rotation2d.fromDegrees(frontLeft.getAngle()));
+    states[1] = optimize(states[1], Rotation2d.fromDegrees(frontRight.getAngle()));
+    states[2] = optimize(states[2], Rotation2d.fromDegrees(backLeft.getAngle()));
+    states[3] = optimize(states[3], Rotation2d.fromDegrees(backRight.getAngle()));
 
-      states[0] = optimize(states[0], Rotation2d.fromDegrees(frontLeft.getAngle()));
-      states[1] = optimize(states[1], Rotation2d.fromDegrees(frontRight.getAngle()));
-      states[2] = optimize(states[2], Rotation2d.fromDegrees(backLeft.getAngle()));
-      states[3] = optimize(states[3], Rotation2d.fromDegrees(backRight.getAngle()));
+		// Drives the modules by giving them the desired speed and angle
+    frontLeft.drive(states[0].speedMetersPerSecond, states[0].angle.getDegrees());
+    frontRight.drive(states[1].speedMetersPerSecond, states[1].angle.getDegrees());
+    backLeft.drive(states[2].speedMetersPerSecond, states[2].angle.getDegrees());
+    backRight.drive(states[3].speedMetersPerSecond, states[3].angle.getDegrees());
 
-      frontLeft.drive(states[0].speedMetersPerSecond, states[0].angle.getDegrees());
-      frontRight.drive(states[1].speedMetersPerSecond, states[1].angle.getDegrees());
-      backLeft.drive(states[2].speedMetersPerSecond, states[2].angle.getDegrees());
-      backRight.drive(states[3].speedMetersPerSecond, states[3].angle.getDegrees());
+		// Puts important information on the SmartDashboard for debugging and tuning purposes
+    SmartDashboard.putNumber("Front Left Desired Angle", AngleUtil.circleMod(states[0].angle.getDegrees()));
+    SmartDashboard.putNumber("Front Right Desired Angle", AngleUtil.circleMod(states[1].angle.getDegrees()));
+    SmartDashboard.putNumber("Backleft Desired Angle", AngleUtil.circleMod(states[2].angle.getDegrees()));
+    SmartDashboard.putNumber("Backright Desired Angle", AngleUtil.circleMod(states[3].angle.getDegrees()));
 
-      SmartDashboard.putNumber("Front Left Desired Angle", AngleUtil.circleMod(states[0].angle.getDegrees()));
-      SmartDashboard.putNumber("Front Right Desired Angle", AngleUtil.circleMod(states[1].angle.getDegrees()));
-      SmartDashboard.putNumber("Backleft Desired Angle", AngleUtil.circleMod(states[2].angle.getDegrees()));
-      SmartDashboard.putNumber("Backright Desired Angle", AngleUtil.circleMod(states[3].angle.getDegrees()));
+    SmartDashboard.putNumber("Front Left Power", states[0].speedMetersPerSecond);
+    SmartDashboard.putNumber("Front Right Power", states[1].speedMetersPerSecond);
+    SmartDashboard.putNumber("Back Left Power", states[2].speedMetersPerSecond);
+    SmartDashboard.putNumber("Back Right Power", states[3].speedMetersPerSecond);
 
-      SmartDashboard.putNumber("Front Left Power", states[0].speedMetersPerSecond);
-      SmartDashboard.putNumber("Front Right Power", states[1].speedMetersPerSecond);
-      SmartDashboard.putNumber("Back Left Power", states[2].speedMetersPerSecond);
-      SmartDashboard.putNumber("Back Right Power", states[3].speedMetersPerSecond);
+    SmartDashboard.putNumber("Front Left Angle", frontLeft.getAngle());
+    SmartDashboard.putNumber("Front Right Angle", frontRight.getAngle());
+    SmartDashboard.putNumber("Back Left Angle", backLeft.getAngle());
+    SmartDashboard.putNumber("Back Right Angle", backRight.getAngle());
 
-      SmartDashboard.putNumber("Front Left Angle", frontLeft.getAngle());
-      SmartDashboard.putNumber("Front Right Angle", frontRight.getAngle());
-      SmartDashboard.putNumber("Back Left Angle", backLeft.getAngle());
-      SmartDashboard.putNumber("Back Right Angle", backRight.getAngle());
+    SmartDashboard.putNumber("Front Left Speed", frontLeft.getSpeed());
+    SmartDashboard.putNumber("Front Right Speed", frontRight.getSpeed());
+    SmartDashboard.putNumber("Back Left Speed", backLeft.getSpeed());
+    SmartDashboard.putNumber("Back Right Speed", backRight.getSpeed());
 
-      SmartDashboard.putNumber("Front Left Speed", frontLeft.getSpeed());
-      SmartDashboard.putNumber("Front Right Speed", frontRight.getSpeed());
-      SmartDashboard.putNumber("Back Left Speed", backLeft.getSpeed());
-      SmartDashboard.putNumber("Back Right Speed", backRight.getSpeed());
+    SmartDashboard.putBoolean("Front Left Optimized?", frontLeft.isOptimized());
+    SmartDashboard.putBoolean("Front Right Optimized?", frontRight.isOptimized());
+    SmartDashboard.putBoolean("Back Left Optimized?", backLeft.isOptimized());
+    SmartDashboard.putBoolean("Back Right Optimized?", backRight.isOptimized());
 
-      SmartDashboard.putBoolean("Front Left Optimized?", frontLeft.isOptimized());
-      SmartDashboard.putBoolean("Front Right Optimized?", frontRight.isOptimized());
-      SmartDashboard.putBoolean("Back Left Optimized?", backLeft.isOptimized());
-      SmartDashboard.putBoolean("Back Right Optimized?", backRight.isOptimized());
+    SmartDashboard.putNumber("Pose X", odometry.getPoseMeters().getTranslation().getX());
+    SmartDashboard.putNumber("Pose Y", odometry.getPoseMeters().getTranslation().getY());
+    SmartDashboard.putNumber("Pose Degrees", getAngle());
 
-      odometry.update(Rotation2d.fromDegrees(getAngle()), modulePositions());
-
-      // odometry.getPoseMeters();
-      SmartDashboard.putNumber("Pose X", odometry.getPoseMeters().getTranslation().getX());
-      SmartDashboard.putNumber("Pose Y", odometry.getPoseMeters().getTranslation().getY());
-      SmartDashboard.putNumber("Pose Degrees", getAngle());
-    } 
-    else {
-      stopMotors();
-      System.out.println("Front Left: " + frontLeft.getAngle());
-      System.out.println("Front Right: " + frontRight.getAngle());
-      System.out.println("Back Left: " + backLeft.getAngle());
-      System.out.println("Back Right: " + backRight.getAngle());
-    }
+    // Updates the odometry
+    odometry.update(Rotation2d.fromDegrees(getAngle()), modulePositions());
   }
 
   public void stopMotors() {
@@ -241,18 +233,15 @@ public class SwerveSubsystem extends SubsystemBase {
       return new SwerveModuleState(
           -desiredState.speedMetersPerSecond,
           desiredState.angle.rotateBy(Rotation2d.fromDegrees(180.0)));
-    } else {
+    } 
+    else {
       return new SwerveModuleState(desiredState.speedMetersPerSecond, desiredState.angle);
     }
   }
 
-  /**
-   * Returns the Singleton instance of this Swervesubsystem. This static method
-   * should be used -- {@code SwerveSubsystem.getInstance();} -- by external
-   * classes, rather than the constructor to get the instance of this class.
-   */
-  public static SwerveSubsystem getInstance() {
-    return INSTANCE;
+  // Adds 180 degrees to the gyroscope
+  public void allianceRelativeGyroscopeControl() {
+    gyro.setFusedHeading(getAngle() + 180);
   }
 
   @Override
